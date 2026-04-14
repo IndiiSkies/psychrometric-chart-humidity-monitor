@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Psychrometric Pro Tool</title>
+
+<style>
+body { font-family: Arial; text-align:center; background:#eef2f7; }
+
+canvas { background:white; border:1px solid #ccc; cursor:crosshair; }
+
+/* Big Display */
+.display {
+    margin:20px auto;
+    padding:20px;
+    width:320px;
+    border-radius:12px;
+    background:#111;
+    color:white;
+}
+
+.big { font-size:40px; }
+
+.bar {
+    height:20px;
+    border-radius:10px;
+    margin-top:10px;
+    background: linear-gradient(to right,
+        #3498db, #5dade2, #2ecc71, #f1c40f, #e74c3c);
+}
+
+.marker {
+    height:20px;
+    width:4px;
+    background:white;
+    position:relative;
+    top:-20px;
+}
+</style>
+</head>
+
+<body>
+
+<h2>Psychrometric Tool (Pro)</h2>
+
+<input id="temp" type="number" placeholder="Temperature">
+<select id="unit">
+<option value="C">°C</option>
+<option value="F">°F</option>
+</select>
+
+<input id="rh" type="number" placeholder="Humidity (%)">
+
+<button onclick="updateFromInputs()">Update</button>
+
+<br><br>
+<canvas id="chart" width="900" height="520"></canvas>
+
+<div id="readout"></div>
+
+<div class="display">
+    <div id="tempDisplay" class="big">--</div>
+    <div id="rhDisplay" class="big">--</div>
+
+    <div class="bar"></div>
+    <div id="marker" class="marker"></div>
+
+    <div id="comfortText"></div>
+</div>
+
+<script>
+const canvas = document.getElementById("chart");
+const ctx = canvas.getContext("2d");
+
+const width = canvas.width;
+const height = canvas.height;
+
+const tMin=0, tMax=50, wMax=0.03;
+
+let currentT=25;
+let currentRH=50;
+
+// === Thermo ===
+function toC(t,u){ return u==="F" ? (t-32)*5/9 : t; }
+function toF(t){ return t*9/5+32; }
+
+function satP(T){
+    return 0.61078*Math.exp((17.27*T)/(T+237.3));
+}
+
+function humRatio(T,RH){
+    let Ps=satP(T);
+    let Pv=RH/100*Ps;
+    return 0.62198*Pv/(101.325-Pv);
+}
+
+function dewPoint(T,RH){
+    let a=17.27,b=237.7;
+    let alpha=((a*T)/(b+T))+Math.log(RH/100);
+    return (b*alpha)/(a-alpha);
+}
+
+function wetBulb(T,RH){
+    return T*Math.atan(0.151977*Math.sqrt(RH+8.3))
+    +Math.atan(T+RH)-Math.atan(RH-1.676)
+    +0.0039*Math.pow(RH,1.5)*Math.atan(0.023*RH)-4.686;
+}
+
+function enthalpy(T,W){
+    return 1.006*T + W*(2501 + 1.86*T);
+}
+
+// === Mapping ===
+function x(T){ return (T-tMin)/(tMax-tMin)*width; }
+function y(W){ return height-(W/wMax*height); }
+
+function invX(px){ return tMin + (px/width)*(tMax-tMin); }
+function invY(py){ return (height-py)/height*wMax; }
+
+// === Comfort index (0–100) ===
+function comfortIndex(RH){
+    return Math.min(100, Math.max(0, RH));
+}
+
+// === Draw ===
+function draw(){
+    ctx.clearRect(0,0,width,height);
+
+    drawGrid();
+    drawAxes();
+    drawZones();
+    drawCurves();
+    drawEnthalpyLines();
+    drawPoint();
+}
+
+function drawGrid(){
+    ctx.strokeStyle="#eee";
+    for(let t=0;t<=50;t+=5){
+        ctx.beginPath(); ctx.moveTo(x(t),0); ctx.lineTo(x(t),height); ctx.stroke();
+    }
+    for(let w=0;w<=wMax;w+=0.005){
+        ctx.beginPath(); ctx.moveTo(0,y(w)); ctx.lineTo(width,y(w)); ctx.stroke();
+    }
+}
+
+function drawAxes(){
+    ctx.strokeStyle="#000";
+    ctx.beginPath(); ctx.moveTo(0,height); ctx.lineTo(width,height); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(0,height); ctx.stroke();
+
+    ctx.fillStyle="#000";
+    for(let t=0;t<=50;t+=5){
+        ctx.fillText(t+"°C", x(t)-10, height-5);
+    }
+    for(let w=0;w<=wMax;w+=0.005){
+        ctx.fillText(w.toFixed(3), 5, y(w));
+    }
+}
+
+// === Comfort zones overlay ===
+function drawZones(){
+    // Dry
+    ctx.fillStyle="rgba(52,152,219,0.15)";
+    ctx.fillRect(0,0,width,height*0.4);
+
+    // Comfort
+    ctx.fillStyle="rgba(46,204,113,0.15)";
+    ctx.fillRect(0,height*0.4,width,height*0.3);
+
+    // Humid
+    ctx.fillStyle="rgba(231,76,60,0.15)";
+    ctx.fillRect(0,height*0.7,width,height*0.3);
+
+    ctx.fillStyle="#000";
+    ctx.fillText("DRY", width-60, 20);
+    ctx.fillText("COMFORT", width-100, height*0.5);
+    ctx.fillText("HUMID", width-70, height-20);
+}
+
+// RH curves
+function drawCurves(){
+    for(let rh=10;rh<=100;rh+=10){
+        ctx.beginPath();
+        for(let T=0;T<=50;T+=0.5){
+            let W=humRatio(T,rh);
+            let px=x(T), py=y(W);
+            if(T===0) ctx.moveTo(px,py);
+            else ctx.lineTo(px,py);
+        }
+        ctx.strokeStyle = rh===100 ? "#000":"#bbb";
+        ctx.stroke();
+    }
+}
+
+// Enthalpy lines
+function drawEnthalpyLines(){
+    ctx.strokeStyle="#f39c12";
+    for(let h=10; h<=100; h+=10){
+        ctx.beginPath();
+        for(let T=0;T<=50;T+=1){
+            let W=(h-1.006*T)/(2501+1.86*T);
+            if(W>0 && W<wMax){
+                let px=x(T), py=y(W);
+                if(T===0) ctx.moveTo(px,py);
+                else ctx.lineTo(px,py);
+            }
+        }
+        ctx.stroke();
+    }
+}
+
+// Point
+function drawPoint(){
+    let W=humRatio(currentT,currentRH);
+    ctx.beginPath();
+    ctx.arc(x(currentT),y(W),6,0,2*Math.PI);
+    ctx.fillStyle="red";
+    ctx.fill();
+}
+
+// === Update ===
+function updateDisplays(){
+    let unit=document.getElementById("unit").value;
+
+    let displayTemp = unit==="F" ? toF(currentT):currentT;
+
+    document.getElementById("tempDisplay").innerText =
+        displayTemp.toFixed(1)+"°"+unit;
+
+    document.getElementById("rhDisplay").innerText =
+        currentRH.toFixed(0)+"%";
+
+    let idx=comfortIndex(currentRH);
+
+    document.getElementById("marker").style.left = idx*3+"px";
+
+    let label =
+        idx<20?"Very Dry":
+        idx<40?"Dry":
+        idx<60?"Comfort":
+        idx<80?"Humid":"Very Humid";
+
+    document.getElementById("comfortText").innerText = label;
+
+    let W=humRatio(currentT,currentRH);
+
+    document.getElementById("readout").innerHTML = `
+        Dew Point: ${dewPoint(currentT,currentRH).toFixed(1)} °C |
+        Wet Bulb: ${wetBulb(currentT,currentRH).toFixed(1)} °C |
+        Enthalpy: ${enthalpy(currentT,W).toFixed(1)} kJ/kg
+    `;
+}
+
+function updateFromInputs(){
+    let t=parseFloat(document.getElementById("temp").value);
+    let rh=parseFloat(document.getElementById("rh").value);
+    let unit=document.getElementById("unit").value;
+
+    if(isNaN(t)||isNaN(rh)) return;
+
+    currentT=toC(t,unit);
+    currentRH=rh;
+
+    draw();
+    updateDisplays();
+}
+
+// Click interaction
+canvas.addEventListener("click", e=>{
+    let rect=canvas.getBoundingClientRect();
+    let px=e.clientX-rect.left;
+    let py=e.clientY-rect.top;
+
+    currentT=invX(px);
+
+    let W=invY(py);
+    let Ps=satP(currentT);
+    let Pv=(W*101.325)/(0.62198+W);
+    currentRH=Math.max(0,Math.min(100,Pv/Ps*100));
+
+    draw();
+    updateDisplays();
+});
+
+draw();
+updateDisplays();
+</script>
+
+</body>
+</html>
