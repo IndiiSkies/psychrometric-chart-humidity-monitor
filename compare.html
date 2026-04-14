@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Psychrometric HVAC Master Tool</title>
+
+<style>
+body { font-family: Arial; background:#eef2f7; text-align:center; }
+
+.wrapper { display:flex; gap:15px; justify-content:center; flex-wrap:wrap; }
+
+canvas { background:white; border:1px solid #ccc; cursor:grab; }
+
+.panel {
+  width:320px;
+  background:white;
+  padding:10px;
+  border-radius:10px;
+}
+
+.display {
+  background:#111;
+  color:white;
+  border-radius:12px;
+  padding:15px;
+}
+
+.big { font-size:34px; }
+
+.bar {
+  height:14px;
+  background: linear-gradient(to right,#3498db,#2ecc71,#f1c40f,#e67e22,#e74c3c);
+  border-radius:10px;
+}
+
+/* COMFORT BAR */
+.bar-container{
+  position:relative;
+  margin-top:10px;
+}
+
+.arrow{
+  position:absolute;
+  top:-18px;
+  transform:translateX(-50%);
+  font-size:16px;
+  color:#fff;
+  left:0%;
+  transition:left 0.25s ease;
+}
+
+.bar-labels{
+  display:flex;
+  justify-content:space-between;
+  font-size:11px;
+  margin-top:6px;
+  color:#ddd;
+}
+
+small {
+  font-size:11px;
+  color:#444;
+  display:block;
+  margin-top:8px;
+  text-align:left;
+}
+</style>
+</head>
+
+<body>
+
+<h2>Psychrometric HVAC Master Tool</h2>
+
+<div class="wrapper">
+
+<canvas id="chart" width="820" height="520"></canvas>
+
+<div>
+
+<!-- DISPLAY -->
+<div class="panel display">
+<div id="tempD" class="big">--</div>
+<div id="rhD" class="big">--</div>
+
+<div class="bar-container">
+  <div class="bar"></div>
+  <div id="rhArrow" class="arrow">▲</div>
+</div>
+
+<div class="bar-labels">
+  <span>Very Dry</span>
+  <span>Dry</span>
+  <span>Comfort</span>
+  <span>Humid</span>
+  <span>Very Humid</span>
+</div>
+
+<div id="extra"></div>
+</div>
+
+<!-- MANUAL -->
+<div class="panel">
+<h4>Manual Input</h4>
+<input id="temp"><br>
+
+<select id="unit">
+<option value="C">°C</option>
+<option value="F">°F</option>
+</select><br>
+
+<input id="rh" placeholder="RH %"><br>
+<button onclick="setManual()">Apply</button>
+</div>
+
+<!-- WEATHER -->
+<div class="panel">
+<h4>Weather (USA)</h4>
+
+<input id="loc" placeholder="City or ZIP"><br>
+
+<button onclick="getWeather()">Current</button>
+<button onclick="getForecast()">7 Day Plot</button>
+<button onclick="gps()">GPS</button>
+
+<br><br>
+
+<label>Time of Day: <span id="hourLabel">12 PM</span></label><br>
+
+<input id="hourSlider" type="range" min="1" max="12" value="12"
+ oninput="setHour(this.value)">
+
+<select id="ampm" onchange="setHour(document.getElementById('hourSlider').value)">
+  <option value="AM">AM</option>
+  <option value="PM" selected>PM</option>
+</select>
+</div>
+
+<!-- HVAC -->
+<div class="panel">
+<h4>HVAC Tools</h4>
+
+Indoor T:<input id="indT"><br>
+Indoor RH:<input id="indRH"><br>
+Mix %:<input id="mix"><br>
+<button onclick="mixAir()">Mix</button><br><br>
+
+Coil Temp:<input id="coilT"><br>
+<button onclick="coil()">Coil</button>
+
+<small id="footnote">
+Simplified psychrometric model (no solar/load dynamics).
+</small>
+</div>
+
+</div>
+</div>
+
+<script>
+const c = document.getElementById("chart");
+const ctx = c.getContext("2d");
+
+let state = {T:25,RH:50};
+let outdoor = null, indoor = null, mixed = null, coilOut = null;
+
+let forecastPoints = [];
+let selectedHour = 12;
+
+// ================= THERMO =================
+function satP(T){
+ return 0.61078 * Math.exp((17.27*T)/(T+237.3));
+}
+
+function humRatio(T,RH){
+ let Ps = satP(T);
+ let Pv = RH/100 * Ps;
+ return 0.62198 * Pv / (101.325 - Pv);
+}
+
+// ================= SCALE =================
+const W = 820, H = 520;
+const TMIN = 0, TMAX = 50, WMAX = 0.03;
+
+function x(T){ return (T-TMIN)/(TMAX-TMIN)*W; }
+function y(Wv){ return H - (Wv/WMAX)*H; }
+
+// ================= DRAW =================
+function draw(){
+ ctx.clearRect(0,0,W,H);
+
+ grid(); axes(); zones(); curves();
+
+ drawPoint(state,"red");
+ if(outdoor) drawPoint(outdoor,"blue");
+ if(indoor) drawPoint(indoor,"green");
+
+ if(mixed){
+  drawPoint(mixed,"purple");
+  line(indoor,mixed);
+  line(outdoor,mixed);
+ }
+
+ if(coilOut){
+  drawPoint(coilOut,"orange");
+  line(mixed||indoor,coilOut);
+ }
+
+ drawForecast();
+}
+
+// ================= GRAPH =================
+function grid(){
+ ctx.strokeStyle="#eee";
+ for(let t=0;t<=50;t+=5){
+  ctx.beginPath();
+  ctx.moveTo(x(t),0);
+  ctx.lineTo(x(t),H);
+  ctx.stroke();
+ }
+}
+
+function axes(){
+ ctx.strokeStyle="#000";
+ ctx.beginPath();
+ ctx.moveTo(0,H); ctx.lineTo(W,H);
+ ctx.moveTo(0,0); ctx.lineTo(0,H);
+ ctx.stroke();
+
+ ctx.fillStyle="#000";
+ for(let t=0;t<=50;t+=10){
+  ctx.fillText(t+"°C",x(t),H-5);
+ }
+
+ ctx.fillText("Dry Bulb Temperature (°C)",W/2,H-20);
+}
+
+function curves(){
+ for(let rh=10;rh<=100;rh+=10){
+  ctx.beginPath();
+  for(let T=0;T<=50;T++){
+   let Wv = humRatio(T,rh);
+   let px = x(T), py = y(Wv);
+   if(T===0) ctx.moveTo(px,py);
+   else ctx.lineTo(px,py);
+  }
+  ctx.strokeStyle="#bbb";
+  ctx.stroke();
+ }
+}
+
+function zones(){
+ ctx.fillStyle="rgba(46,204,113,0.12)";
+ ctx.fillRect(0,H*0.35,W,H*0.35);
+
+ ctx.fillStyle="rgba(52,152,219,0.12)";
+ ctx.fillRect(0,0,W,H*0.35);
+
+ ctx.fillStyle="rgba(231,76,60,0.12)";
+ ctx.fillRect(0,H*0.7,W,H*0.3);
+}
+
+// ================= POINTS =================
+function drawPoint(p,color){
+ if(!p) return;
+ let Wv = humRatio(p.T,p.RH);
+ ctx.beginPath();
+ ctx.arc(x(p.T),y(Wv),6,0,Math.PI*2);
+ ctx.fillStyle=color;
+ ctx.fill();
+}
+
+function line(a,b){
+ if(!a||!b) return;
+ let Wa = humRatio(a.T,a.RH);
+ let Wb = humRatio(b.T,b.RH);
+ ctx.beginPath();
+ ctx.moveTo(x(a.T),y(Wa));
+ ctx.lineTo(x(b.T),y(Wb));
+ ctx.stroke();
+}
+
+// ================= FORECAST =================
+function drawForecast(){
+ if(!forecastPoints.length) return;
+
+ ctx.strokeStyle="#ff6600";
+ ctx.beginPath();
+
+ for(let i=0;i<forecastPoints.length;i++){
+  let p = forecastPoints[i];
+
+  let Wv = humRatio(p.T,p.RH);
+  let px = x(p.T);
+  let py = y(Wv);
+
+  if(i===0) ctx.moveTo(px,py);
+  else ctx.lineTo(px,py);
+
+  ctx.beginPath();
+  ctx.arc(px,py,5,0,Math.PI*2);
+  ctx.fillStyle="#ff6600";
+  ctx.fill();
+
+  ctx.fillStyle="#000";
+  ctx.font="11px Arial";
+  ctx.fillText(p.label,px-15,py+18);
+
+  ctx.beginPath();
+ }
+
+ ctx.stroke();
+}
+
+// ================= UI =================
+function updateUI(){
+ document.getElementById("tempD").innerText = state.T.toFixed(1)+"°C";
+ document.getElementById("rhD").innerText = state.RH.toFixed(0)+"%";
+
+ document.getElementById("extra").innerText =
+ "W: " + humRatio(state.T,state.RH).toFixed(4);
+
+ let rh = Math.max(0, Math.min(100, state.RH));
+ document.getElementById("rhArrow").style.left = rh + "%";
+}
+
+// ================= TIME CONTROL (FIXED) =================
+function setHour(v){
+ let hour = parseInt(v);
+ let ampm = document.getElementById("ampm").value;
+
+ let h24 = hour % 12;
+ if(ampm === "PM") h24 += 12;
+ if(ampm === "AM" && hour === 12) h24 = 0;
+
+ selectedHour = h24;
+
+ document.getElementById("hourLabel").innerText =
+ hour + " " + ampm;
+}
+
+// ================= MANUAL =================
+function setManual(){
+ let t = parseFloat(document.getElementById("temp").value);
+ let rh = parseFloat(document.getElementById("rh").value);
+ let u = document.getElementById("unit").value;
+
+ if(isNaN(t)||isNaN(rh)) return;
+
+ state.T = u==="F"?(t-32)*5/9:t;
+ state.RH = rh;
+
+ draw(); updateUI();
+}
+
+// ================= WEATHER =================
+async function getWeather(){
+ let loc = document.getElementById("loc").value;
+
+ let geo = await fetch(
+ `https://geocoding-api.open-meteo.com/v1/search?name=${loc}&count=1&country=US`
+ ).then(r=>r.json());
+
+ if(!geo.results) return alert("Location not found");
+
+ let g = geo.results[0];
+
+ let w = await fetch(
+ `https://api.open-meteo.com/v1/forecast?latitude=${g.latitude}&longitude=${g.longitude}&hourly=temperature_2m,relative_humidity_2m&timezone=auto`
+ ).then(r=>r.json());
+
+ let i = selectedHour;
+
+ outdoor = {
+  T: w.hourly.temperature_2m[i],
+  RH: w.hourly.relative_humidity_2m[i]
+ };
+
+ state = {...outdoor};
+ draw(); updateUI();
+}
+
+// ================= FORECAST =================
+async function getForecast(){
+ let loc = document.getElementById("loc").value;
+
+ let geo = await fetch(
+ `https://geocoding-api.open-meteo.com/v1/search?name=${loc}&count=1&country=US`
+ ).then(r=>r.json());
+
+ if(!geo.results) return alert("Location not found");
+
+ let g = geo.results[0];
+
+ let f = await fetch(
+ `https://api.open-meteo.com/v1/forecast?latitude=${g.latitude}&longitude=${g.longitude}&hourly=temperature_2m,relative_humidity_2m&timezone=auto`
+ ).then(r=>r.json());
+
+ forecastPoints = [];
+
+ for(let d=0; d<7; d++){
+  let idx = d*24 + selectedHour;
+
+  forecastPoints.push({
+   T: f.hourly.temperature_2m[idx],
+   RH: f.hourly.relative_humidity_2m[idx],
+   label: f.hourly.time[idx].slice(5,10)
+  });
+ }
+
+ draw();
+}
+
+// ================= GPS =================
+function gps(){
+ navigator.geolocation.getCurrentPosition(async p=>{
+  let w = await fetch(
+   `https://api.open-meteo.com/v1/forecast?latitude=${p.coords.latitude}&longitude=${p.coords.longitude}&hourly=temperature_2m,relative_humidity_2m&timezone=auto`
+  ).then(r=>r.json());
+
+  let i = selectedHour;
+
+  outdoor = {
+   T: w.hourly.temperature_2m[i],
+   RH: w.hourly.relative_humidity_2m[i]
+  };
+
+  state = {...outdoor};
+  draw(); updateUI();
+ });
+}
+
+// ================= MIX =================
+function mixAir(){
+ if(!outdoor) return alert("Fetch weather first");
+
+ let indT = parseFloat(document.getElementById("indT").value);
+ let indRH = parseFloat(document.getElementById("indRH").value);
+ let f = parseFloat(document.getElementById("mix").value)/100;
+
+ if(isNaN(indT)||isNaN(indRH)||isNaN(f)) return;
+
+ indoor = {T:indT,RH:indRH};
+
+ let Wo = humRatio(outdoor.T,outdoor.RH);
+ let Wi = humRatio(indoor.T,indoor.RH);
+
+ let Wm = f*Wo + (1-f)*Wi;
+ let Tm = f*outdoor.T + (1-f)*indoor.T;
+
+ let Pv = (Wm*101.325)/(0.62198+Wm);
+ let RHm = Pv/satP(Tm)*100;
+
+ mixed = {T:Tm,RH:RHm};
+
+ draw();
+}
+
+// ================= COIL =================
+function coil(){
+ let Tcoil = parseFloat(document.getElementById("coilT").value);
+ if(isNaN(Tcoil)) return;
+
+ let src = mixed || indoor || state;
+
+ let Ps = satP(Tcoil);
+ let Ws = 0.62198*Ps/(101.325-Ps);
+
+ let Wsrc = humRatio(src.T,src.RH);
+ let Wf = Math.min(Wsrc,Ws);
+
+ let Pv = (Wf*101.325)/(0.62198+Wf);
+ let RHf = Pv/satP(Tcoil)*100;
+
+ coilOut = {T:Tcoil,RH:RHf};
+
+ draw();
+}
+
+// ================= DRAG =================
+let dragging = false;
+
+c.addEventListener("mousedown",()=>dragging=true);
+window.addEventListener("mouseup",()=>dragging=false);
+
+c.addEventListener("mousemove",(e)=>{
+ if(!dragging) return;
+
+ let r = c.getBoundingClientRect();
+ let mx = e.clientX - r.left;
+ let my = e.clientY - r.top;
+
+ let T = TMIN + (mx/W)*(TMAX-TMIN);
+ let Wv = WMAX*(1 - my/H);
+
+ state.T = Math.max(0,Math.min(50,T));
+
+ let Ps = satP(state.T);
+ let Pv = (Wv*101.325)/(0.62198+Wv);
+ state.RH = Math.max(0,Math.min(100,(Pv/Ps)*100));
+
+ draw(); updateUI();
+});
+
+// INIT
+draw();
+updateUI();
+</script>
+
+</body>
+</html>
